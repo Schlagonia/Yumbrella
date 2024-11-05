@@ -3,10 +3,16 @@ pragma solidity ^0.8.18;
 
 import "forge-std/console2.sol";
 import {ExtendedTest} from "./ExtendedTest.sol";
+import {VyperDeployer} from "./VyperDeployer.sol";
 
-import {Strategy, ERC20} from "../../Strategy.sol";
-import {StrategyFactory} from "../../StrategyFactory.sol";
-import {IStrategyInterface} from "../../interfaces/IStrategyInterface.sol";
+import {Yumbrella, ERC20, IOracle, IVault} from "../../Yumbrella.sol";
+import {YumbrellaFactory} from "../../YumbrellaFactory.sol";
+import {IYumbrella} from "../../interfaces/IYumbrella.sol";
+
+import {MockOracle} from "../Mocks/MockOracle.sol";
+import {Clonable} from "@periphery/utils/Clonable.sol";
+
+import {Roles} from "@yearn-vaults/interfaces/Roles.sol";
 
 // Inherit the events so they can be checked if desired.
 import {IEvents} from "@tokenized-strategy/interfaces/IEvents.sol";
@@ -19,12 +25,16 @@ interface IFactory {
     function set_protocol_fee_recipient(address) external;
 }
 
-contract Setup is ExtendedTest, IEvents {
+contract Setup is ExtendedTest, IEvents, Clonable {
     // Contract instances that we will use repeatedly.
     ERC20 public asset;
-    IStrategyInterface public strategy;
+    IYumbrella public yumbrella;
+    YumbrellaFactory public yumbrellaFactory;
 
-    StrategyFactory public strategyFactory;
+    IVault public seniorVault;
+    IOracle public assetToSeniorOracle;
+
+    VyperDeployer public vyperDeployer = new VyperDeployer();
 
     mapping(string => address) public tokenAddrs;
 
@@ -32,6 +42,7 @@ contract Setup is ExtendedTest, IEvents {
     address public user = address(10);
     address public keeper = address(4);
     address public management = address(1);
+    address public vaultManagement = address(2);
     address public performanceFeeRecipient = address(3);
     address public emergencyAdmin = address(5);
 
@@ -58,75 +69,128 @@ contract Setup is ExtendedTest, IEvents {
         // Set decimals
         decimals = asset.decimals();
 
-        strategyFactory = new StrategyFactory(
+        yumbrellaFactory = new YumbrellaFactory(
             management,
             performanceFeeRecipient,
             keeper,
             emergencyAdmin
         );
 
-        // Deploy strategy and set variables
-        strategy = IStrategyInterface(setUpStrategy());
+        seniorVault = setUpVault();
 
-        factory = strategy.FACTORY();
+        assetToSeniorOracle = new MockOracle();
+
+        // Deploy strategy and set variables
+        yumbrella = IYumbrella(
+            setUpYumbrella(address(seniorVault), address(assetToSeniorOracle))
+        );
+
+        factory = yumbrella.FACTORY();
 
         // label all the used addresses for traces
         vm.label(keeper, "keeper");
         vm.label(factory, "factory");
         vm.label(address(asset), "asset");
         vm.label(management, "management");
-        vm.label(address(strategy), "strategy");
+        vm.label(address(yumbrella), "yumbrella");
+        vm.label(vaultManagement, "vaultManagement");
+        vm.label(address(seniorVault), "seniorVault");
         vm.label(performanceFeeRecipient, "performanceFeeRecipient");
     }
 
-    function setUpStrategy() public returns (address) {
+    function setUpVault() public returns (IVault) {
+        if (original == address(0)) {
+            original = vyperDeployer.deployContract(
+                "lib/yearn-vaults-v3/contracts/",
+                "VaultV3"
+            );
+        }
+
+        IVault _vault = IVault(_clone());
+
+        _vault.initialize(
+            address(asset),
+            "Test vault",
+            "tsVault",
+            management,
+            10 days
+        );
+
+        vm.prank(management);
+        // Give the vault manager all the roles
+        _vault.set_role(vaultManagement, Roles.ALL);
+
+        vm.prank(vaultManagement);
+        _vault.set_deposit_limit(type(uint256).max);
+
+        return _vault;
+    }
+
+    function setUpYumbrella(address _seniorVault, address _assetToSeniorOracle)
+        public
+        returns (address)
+    {
         // we save the strategy as a IStrategyInterface to give it the needed interface
-        IStrategyInterface _strategy = IStrategyInterface(
+        IYumbrella _yumbrella = IYumbrella(
             address(
-                strategyFactory.newStrategy(
+                yumbrellaFactory.newYumbrella(
                     address(asset),
-                    "Tokenized Strategy"
+                    "Tokenized Strategy",
+                    address(seniorVault),
+                    address(assetToSeniorOracle)
                 )
             )
         );
 
         vm.prank(management);
-        _strategy.acceptManagement();
+        _yumbrella.acceptManagement();
 
-        return address(_strategy);
+        vm.prank(vaultManagement);
+        seniorVault.set_deposit_limit_module(address(_yumbrella));
+
+        vm.prank(vaultManagement);
+        seniorVault.set_withdraw_limit_module(address(_yumbrella));
+
+        vm.prank(vaultManagement);
+        seniorVault.set_accountant(address(_yumbrella));
+
+        vm.prank(vaultManagement);
+        seniorVault.set_use_default_queue(true);
+
+        return address(_yumbrella);
     }
 
-    function depositIntoStrategy(
-        IStrategyInterface _strategy,
+    function depositIntoYumbrella(
+        IYumbrella _yumbrella,
         address _user,
         uint256 _amount
     ) public {
         vm.prank(_user);
-        asset.approve(address(_strategy), _amount);
+        asset.approve(address(_yumbrella), _amount);
 
         vm.prank(_user);
-        _strategy.deposit(_amount, _user);
+        _yumbrella.deposit(_amount, _user);
     }
 
-    function mintAndDepositIntoStrategy(
-        IStrategyInterface _strategy,
+    function mintAndDepositIntoYumbrella(
+        IYumbrella _yumbrella,
         address _user,
         uint256 _amount
     ) public {
         airdrop(asset, _user, _amount);
-        depositIntoStrategy(_strategy, _user, _amount);
+        depositIntoYumbrella(_yumbrella, _user, _amount);
     }
 
     // For checking the amounts in the strategy
-    function checkStrategyTotals(
-        IStrategyInterface _strategy,
+    function checkYumbrellaTotals(
+        IYumbrella _yumbrella,
         uint256 _totalAssets,
         uint256 _totalDebt,
         uint256 _totalIdle
     ) public {
-        uint256 _assets = _strategy.totalAssets();
-        uint256 _balance = ERC20(_strategy.asset()).balanceOf(
-            address(_strategy)
+        uint256 _assets = _yumbrella.totalAssets();
+        uint256 _balance = ERC20(_yumbrella.asset()).balanceOf(
+            address(_yumbrella)
         );
         uint256 _idle = _balance > _assets ? _assets : _balance;
         uint256 _debt = _assets - _idle;
@@ -136,7 +200,11 @@ contract Setup is ExtendedTest, IEvents {
         assertEq(_totalAssets, _totalDebt + _totalIdle, "!Added");
     }
 
-    function airdrop(ERC20 _asset, address _to, uint256 _amount) public {
+    function airdrop(
+        ERC20 _asset,
+        address _to,
+        uint256 _amount
+    ) public {
         uint256 balanceBefore = _asset.balanceOf(_to);
         deal(address(_asset), _to, balanceBefore + _amount);
     }
@@ -152,7 +220,7 @@ contract Setup is ExtendedTest, IEvents {
         IFactory(factory).set_protocol_fee_bps(_protocolFee);
 
         vm.prank(management);
-        strategy.setPerformanceFee(_performanceFee);
+        yumbrella.setPerformanceFee(_performanceFee);
     }
 
     function _setTokenAddrs() internal {

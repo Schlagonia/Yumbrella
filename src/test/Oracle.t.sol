@@ -52,11 +52,11 @@ contract OracleTest is Setup {
         vm.assume(_amount > minFuzzAmount && _amount < maxFuzzAmount);
         _percentChange = uint16(bound(uint256(_percentChange), 10, MAX_BPS));
 
-        mintAndDepositIntoStrategy(strategy, user, _amount);
+        mintAndDepositIntoYumbrella(yumbrella, user, _amount);
 
         uint256 _delta = (_amount * _percentChange) / MAX_BPS;
 
-        checkOracle(address(strategy), _delta);
+        checkOracle(address(yumbrella), _delta);
     }
 
     // TODO: Deploy multiple strategies with different tokens as `asset` to test against the oracle.

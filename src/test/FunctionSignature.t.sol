@@ -2,7 +2,7 @@
 pragma solidity ^0.8.18;
 
 import "forge-std/console2.sol";
-import {Setup, ERC20, IStrategyInterface} from "./utils/Setup.sol";
+import {Setup, ERC20, IYumbrella} from "./utils/Setup.sol";
 
 contract FunctionSignatureTest is Setup {
     function setUp() public virtual override {
@@ -15,7 +15,7 @@ contract FunctionSignatureTest is Setup {
     function test_functionCollisions() public {
         uint256 wad = 1e18;
         vm.expectRevert("initialized");
-        strategy.initialize(
+        yumbrella.initialize(
             address(asset),
             "name",
             management,
@@ -24,70 +24,70 @@ contract FunctionSignatureTest is Setup {
         );
 
         // Check view functions
-        assertEq(strategy.convertToAssets(wad), wad, "convert to assets");
-        assertEq(strategy.convertToShares(wad), wad, "convert to shares");
-        assertEq(strategy.previewDeposit(wad), wad, "preview deposit");
-        assertEq(strategy.previewMint(wad), wad, "preview mint");
-        assertEq(strategy.previewWithdraw(wad), wad, "preview withdraw");
-        assertEq(strategy.previewRedeem(wad), wad, "preview redeem");
-        assertEq(strategy.totalAssets(), 0, "total assets");
-        assertEq(strategy.totalSupply(), 0, "total supply");
-        assertEq(strategy.unlockedShares(), 0, "unlocked shares");
-        assertEq(strategy.asset(), address(asset), "asset");
-        assertEq(strategy.apiVersion(), "3.0.4", "api");
-        assertEq(strategy.MAX_FEE(), 5_000, "max fee");
-        assertEq(strategy.fullProfitUnlockDate(), 0, "unlock date");
-        assertEq(strategy.profitUnlockingRate(), 0, "unlock rate");
-        assertGt(strategy.lastReport(), 0, "last report");
-        assertEq(strategy.pricePerShare(), 10 ** asset.decimals(), "pps");
-        assertTrue(!strategy.isShutdown());
+        assertEq(yumbrella.convertToAssets(wad), wad, "convert to assets");
+        assertEq(yumbrella.convertToShares(wad), wad, "convert to shares");
+        assertEq(yumbrella.previewDeposit(wad), wad, "preview deposit");
+        assertEq(yumbrella.previewMint(wad), wad, "preview mint");
+        assertEq(yumbrella.previewWithdraw(wad), wad, "preview withdraw");
+        assertEq(yumbrella.previewRedeem(wad), wad, "preview redeem");
+        assertEq(yumbrella.totalAssets(), 0, "total assets");
+        assertEq(yumbrella.totalSupply(), 0, "total supply");
+        assertEq(yumbrella.unlockedShares(), 0, "unlocked shares");
+        assertEq(yumbrella.asset(), address(asset), "asset");
+        assertEq(yumbrella.apiVersion(), "3.0.4", "api");
+        assertEq(yumbrella.MAX_FEE(), 5_000, "max fee");
+        assertEq(yumbrella.fullProfitUnlockDate(), 0, "unlock date");
+        assertEq(yumbrella.profitUnlockingRate(), 0, "unlock rate");
+        assertGt(yumbrella.lastReport(), 0, "last report");
+        assertEq(yumbrella.pricePerShare(), 10**asset.decimals(), "pps");
+        assertTrue(!yumbrella.isShutdown());
         assertEq(
-            strategy.symbol(),
+            yumbrella.symbol(),
             string(abi.encodePacked("ys", asset.symbol())),
             "symbol"
         );
-        assertEq(strategy.decimals(), asset.decimals(), "decimals");
+        assertEq(yumbrella.decimals(), asset.decimals(), "decimals");
 
         // Assure modifiers are working
         vm.startPrank(user);
         vm.expectRevert("!management");
-        strategy.setPendingManagement(user);
+        yumbrella.setPendingManagement(user);
         vm.expectRevert("!pending");
-        strategy.acceptManagement();
+        yumbrella.acceptManagement();
         vm.expectRevert("!management");
-        strategy.setKeeper(user);
+        yumbrella.setKeeper(user);
         vm.expectRevert("!management");
-        strategy.setEmergencyAdmin(user);
+        yumbrella.setEmergencyAdmin(user);
         vm.expectRevert("!management");
-        strategy.setPerformanceFee(uint16(2_000));
+        yumbrella.setPerformanceFee(uint16(2_000));
         vm.expectRevert("!management");
-        strategy.setPerformanceFeeRecipient(user);
+        yumbrella.setPerformanceFeeRecipient(user);
         vm.expectRevert("!management");
-        strategy.setProfitMaxUnlockTime(1);
+        yumbrella.setProfitMaxUnlockTime(1);
         vm.stopPrank();
 
         // Assure checks are being used
-        vm.startPrank(strategy.management());
+        vm.startPrank(yumbrella.management());
         vm.expectRevert("Cannot be self");
-        strategy.setPerformanceFeeRecipient(address(strategy));
+        yumbrella.setPerformanceFeeRecipient(address(yumbrella));
         vm.expectRevert("too long");
-        strategy.setProfitMaxUnlockTime(type(uint256).max);
+        yumbrella.setProfitMaxUnlockTime(type(uint256).max);
         vm.stopPrank();
 
         // Mint some shares to the user
-        airdrop(ERC20(address(strategy)), user, wad);
-        assertEq(strategy.balanceOf(address(user)), wad, "balance");
+        airdrop(ERC20(address(yumbrella)), user, wad);
+        assertEq(yumbrella.balanceOf(address(user)), wad, "balance");
         vm.prank(user);
-        strategy.transfer(keeper, wad);
-        assertEq(strategy.balanceOf(user), 0, "second balance");
-        assertEq(strategy.balanceOf(keeper), wad, "keeper balance");
-        assertEq(strategy.allowance(keeper, user), 0, "allowance");
+        yumbrella.transfer(keeper, wad);
+        assertEq(yumbrella.balanceOf(user), 0, "second balance");
+        assertEq(yumbrella.balanceOf(keeper), wad, "keeper balance");
+        assertEq(yumbrella.allowance(keeper, user), 0, "allowance");
         vm.prank(keeper);
-        assertTrue(strategy.approve(user, wad), "approval");
-        assertEq(strategy.allowance(keeper, user), wad, "second allowance");
+        assertTrue(yumbrella.approve(user, wad), "approval");
+        assertEq(yumbrella.allowance(keeper, user), wad, "second allowance");
         vm.prank(user);
-        assertTrue(strategy.transferFrom(keeper, user, wad), "transfer from");
-        assertEq(strategy.balanceOf(user), wad, "second balance");
-        assertEq(strategy.balanceOf(keeper), 0, "keeper balance");
+        assertTrue(yumbrella.transferFrom(keeper, user, wad), "transfer from");
+        assertEq(yumbrella.balanceOf(user), wad, "second balance");
+        assertEq(yumbrella.balanceOf(keeper), 0, "keeper balance");
     }
 }
