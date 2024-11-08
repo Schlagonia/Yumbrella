@@ -4,6 +4,7 @@ pragma solidity ^0.8.18;
 import {BaseHooks, ERC20} from "@periphery/Bases/Hooks/BaseHooks.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+// TODO dont update values twice in the same block
 abstract contract TokenizedStaker is BaseHooks {
     using SafeERC20 for ERC20;
 
@@ -37,7 +38,7 @@ abstract contract TokenizedStaker is BaseHooks {
     uint256 public rewardRate = 0;
 
     /// @notice The duration of our rewards distribution for staking, default is 7 days.
-    uint256 public rewardsDuration = 7 days; // TODO: should this be profitMaxUnlockTime
+    uint256 public rewardsDuration = 7 days;
 
     /// @notice The last time rewards were updated, triggered by updateReward() or notifyRewardAmount().
     /// @dev Will be the timestamp of the update or the end of the period, whichever is earlier.
@@ -62,22 +63,31 @@ abstract contract TokenizedStaker is BaseHooks {
         rewardsToken = ERC20(_rewardsToken);
     }
 
-    function _postDepositHook(
-        uint256 assets,
-        uint256 shares,
+    function _preDepositHook(
+        uint256, /* assets */
+        uint256, /* shares */
         address receiver
     ) internal virtual override {
         _updateReward(receiver);
     }
 
-    function _postWithdrawHook(
-        uint256 assets,
-        uint256 shares,
-        address receiver,
+    function _preWithdrawHook(
+        uint256, /* assets */
+        uint256, /* shares */
+        address, /* receiver */
         address owner,
-        uint256 maxLoss
+        uint256 /* maxLoss */
     ) internal virtual override {
         _updateReward(owner);
+    }
+
+    function _preTransferHook(
+        address from,
+        address to,
+        uint256 amount
+    ) internal virtual override {
+        _updateReward(from);
+        _updateReward(to);
     }
 
     /// @notice Either the current timestamp or end of the most recent period.

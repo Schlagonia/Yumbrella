@@ -23,41 +23,58 @@ contract Yumbrella is TokenizedStaker {
         uint256 timestamp;
     }
 
-    struct UserInfo {
-        uint256 lastDepositTimestamp;
-        WithdrawRequest withdrawRequest;
-    }
-
     uint256 public constant WAD = 1e18;
 
+    /// @notice The senior vault that will use Yumbrella as its accountant.
     IVault public immutable SENIOR_VAULT;
 
+    /// @notice The underlying asset of the senior vault.
     ERC20 public immutable SENIOR_ASSET;
 
+    /// @notice The V3 vault factory that the senior vault belongs to.
     IVaultFactory internal immutable VAULT_FACTORY;
 
+    /// @notice The auction contract that will be used to sell the token for losses.
     address public auction;
 
-    IOracle public assetToSeniorOracle;
+    /// @notice The ratio of the loss to try to refund to the senior vault.
+    uint256 public refundRatio;
 
-    uint256 public withdrawCooldown;
-
-    uint256 public performanceFee;
-
+    /// @notice The accepted ratio of deposits in the senior vault to the amount staked in Yumbrella.
     uint256 public collateralRatio;
 
-    mapping(address => UserInfo) public userInfo;
+    /// @notice The cooldown period after a withdraw request before the user can withdraw.
+    uint256 public withdrawCooldown;
+
+    /// @notice The window of time after a withdraw request has cooled down that the withdraw can be processed.
+    /// If this window passes without the user calling `withdraw`, the user will need to recall `requestWithdraw`.
+    uint256 public withdrawWindow;
+
+    /// @notice The performance fee to charge the senior vault.
+    uint256 public seniorVaultPerformanceFee;
+
+    /// @notice The oracle that will be used to convert the underlying asset to the senior asset.
+    IOracle public assetToSeniorAssetOracle;
+
+    /// @notice The withdraw requests of users.
+    mapping(address => WithdrawRequest) public withdrawRequests;
 
     constructor(
         address _asset,
         string memory _name,
         address _seniorVault,
-        address _assetToSeniorOracle
+        address _assetToSeniorAssetOracle
     ) TokenizedStaker(_seniorVault, _asset, _name) {
         SENIOR_VAULT = IVault(_seniorVault);
         SENIOR_ASSET = ERC20(SENIOR_VAULT.asset());
         VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
-        assetToSeniorOracle = IOracle(_assetToSeniorOracle);
+        assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
+
+        seniorVaultPerformanceFee = 1_000;
+        refundRatio = 10_000;
+        collateralRatio = 100_000; // 10x
+        withdrawCooldown = 7 days;
+        withdrawWindow = 7 days;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -66,37 +83,26 @@ contract Yumbrella is TokenizedStaker {
 
     function _deployFunds(uint256 _amount) internal override {}
 
-    function _postDepositHook(
-        uint256 assets,
-        uint256 shares,
-        address receiver
-    ) internal virtual override {
-        super._postDepositHook(assets, shares, receiver);
-        userInfo[receiver].lastDepositTimestamp = block.timestamp;
-    }
-
     function _freeFunds(uint256 _amount) internal override {}
 
     function _postWithdrawHook(
-        uint256 assets,
-        uint256 shares,
-        address receiver,
+        uint256, /* assets */
+        uint256, /* shares */
+        address, /* receiver */
         address owner,
-        uint256 maxLoss
+        uint256 /* maxLoss */
     ) internal virtual override {
-        super._postWithdrawHook(assets, shares, receiver, owner, maxLoss);
-        userInfo[owner].withdrawRequest.amount -= assets;
+        // Fully reset the withdraw request.
+        delete withdrawRequests[owner];
     }
 
     /*//////////////////////////////////////////////////////////////
                     VAULT CALLBACK FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function available_deposit_limit(address _receiver)
-        external
-        view
-        returns (uint256)
-    {
+    function available_deposit_limit(
+        address /* _receiver */
+    ) external view returns (uint256) {
         uint256 currentAssets = SENIOR_VAULT.totalAssets();
         uint256 maxAssets = (_fromAssetToSeniorAsset(
             asset.balanceOf(address(this))
@@ -108,7 +114,7 @@ contract Yumbrella is TokenizedStaker {
     // Don't allow withdraws if any of the strategies have unrealised losses.
     function available_withdraw_limit(
         address _owner,
-        uint256 _maxLoss,
+        uint256, /* _maxLoss */
         address[] calldata _strategies
     ) external view returns (uint256) {
         for (uint256 i = 0; i < _strategies.length; i++) {
@@ -127,14 +133,14 @@ contract Yumbrella is TokenizedStaker {
     }
 
     function report(
-        address _strategy,
+        address, /* _strategy */
         uint256 _gain,
         uint256 _loss
     ) external returns (uint256 _fees, uint256 _refunds) {
         require(msg.sender == address(SENIOR_VAULT), "only senior vault");
 
         if (_gain > 0) {
-            _fees = (_gain * performanceFee) / MAX_BPS;
+            _fees = (_gain * seniorVaultPerformanceFee) / MAX_BPS;
             (uint16 protocolFee, ) = VAULT_FACTORY.protocol_fee_config(
                 address(SENIOR_VAULT)
             );
@@ -156,20 +162,30 @@ contract Yumbrella is TokenizedStaker {
         _totalAssets = asset.balanceOf(address(this));
     }
 
+    /**
+     * @dev Convert the amount of `asset` to `seniorAsset`.
+     * @param _amount The amount of `asset` to convert.
+     * @return The amount of `seniorAsset` that corresponds to the `_amount` of `asset`.
+     */
     function _fromAssetToSeniorAsset(uint256 _amount)
         internal
         view
         returns (uint256)
     {
-        return (_amount * assetToSeniorOracle.getRate()) / WAD;
+        return (_amount * assetToSeniorAssetOracle.getRate()) / WAD;
     }
 
+    /**
+     * @dev Convert the amount of `seniorAsset` to `asset`.
+     * @param _amount The amount of `seniorAsset` to convert.
+     * @return The amount of `asset` that corresponds to the `_amount` of `seniorAsset`.
+     */
     function _fromSeniorAssetToAsset(uint256 _amount)
         internal
         view
         returns (uint256)
     {
-        return (_amount * WAD) / assetToSeniorOracle.getRate();
+        return (_amount * WAD) / assetToSeniorAssetOracle.getRate();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -200,15 +216,23 @@ contract Yumbrella is TokenizedStaker {
         override
         returns (uint256)
     {
-        WithdrawRequest memory request = userInfo[_owner].withdrawRequest;
-        if (request.timestamp + withdrawCooldown > block.timestamp) {
+        WithdrawRequest memory request = withdrawRequests[_owner];
+        uint256 cooldownEnd = request.timestamp + withdrawCooldown;
+        if (
+            // If the cooldown period has passed
+            cooldownEnd < block.timestamp &&
+            // And the window has not passed
+            cooldownEnd + withdrawWindow > block.timestamp
+        ) {
             return request.amount;
         }
         return 0;
     }
 
+    // NOTE: This means users continue to earn rewards while unlocked.
+    // Should add a max time to withdraw like stAAVE? To prevent calling right after deposit?
     function requestWithdraw(uint256 _amount) external {
-        uint256 currentAmount = userInfo[msg.sender].withdrawRequest.amount;
+        uint256 currentAmount = withdrawRequests[msg.sender].amount;
         _amount = Math.min(
             _amount + currentAmount,
             TokenizedStrategy.convertToAssets(
@@ -216,7 +240,7 @@ contract Yumbrella is TokenizedStaker {
             )
         );
 
-        userInfo[msg.sender].withdrawRequest = WithdrawRequest({
+        withdrawRequests[msg.sender] = WithdrawRequest({
             amount: _amount,
             timestamp: block.timestamp
         });
@@ -241,9 +265,11 @@ contract Yumbrella is TokenizedStaker {
      *
      * This will have no effect on PPS of the strategy till report() is called.
      *
-     * @param _totalIdle The current amount of idle funds that are available to deploy.
+     * @param . The current amount of idle funds that are available to deploy.
      */
-    function _tend(uint256 _totalIdle) internal override {
+    function _tend(
+        uint256 /* _totalIdle */
+    ) internal override {
         uint256 _loss;
         address[] memory strategies = SENIOR_VAULT.get_default_queue();
         for (uint256 i = 0; i < strategies.length; i++) {
@@ -288,6 +314,10 @@ contract Yumbrella is TokenizedStaker {
         return false;
     }
 
+    /**
+     * @dev Set the auction address.
+     * @param _auction The address of the auction.
+     */
     function setAuction(address _auction) external onlyEmergencyAuthorized {
         if (_auction != address(0)) {
             require(Auction(_auction).want() == address(asset), "wrong want");
@@ -295,28 +325,68 @@ contract Yumbrella is TokenizedStaker {
         auction = _auction;
     }
 
-    function setAssetToSeniorOracle(address _assetToSeniorOracle)
+    /**
+     * @dev Set the asset to senior oracle address.
+     * @param _assetToSeniorAssetOracle The address of the asset to senior asset oracle.
+     */
+    function setAssetToSeniorAssetOracle(address _assetToSeniorAssetOracle)
         external
         onlyEmergencyAuthorized
     {
-        require(IOracle(_assetToSeniorOracle).getRate() > 0, "invalid oracle");
-        assetToSeniorOracle = IOracle(_assetToSeniorOracle);
+        require(
+            IOracle(_assetToSeniorAssetOracle).getRate() > 0,
+            "invalid oracle"
+        );
+        assetToSeniorAssetOracle = IOracle(_assetToSeniorAssetOracle);
     }
 
-    function setPerformanceFee(uint256 _performanceFee)
+    /**
+     * @dev Set the performance fee for the multi strategy vault.
+     * @param _seniorVaultPerformanceFee The performance fee to charge the senior vault.
+     */
+    function setSeniorVaultPerformanceFee(uint256 _seniorVaultPerformanceFee)
         external
         onlyManagement
     {
-        performanceFee = _performanceFee;
+        seniorVaultPerformanceFee = _seniorVaultPerformanceFee;
     }
 
+    /**
+     * @dev Set the refund ratio.
+     * @param _refundRatio The refund ratio.
+     */
+    function setRefundRatio(uint256 _refundRatio) external onlyManagement {
+        refundRatio = _refundRatio;
+    }
+
+    /**
+     * @dev Set the withdraw cooldown.
+     * @param _withdrawCooldown The withdraw cooldown.
+     */
     function setWithdrawCooldown(uint256 _withdrawCooldown)
         external
         onlyManagement
     {
+        require(_withdrawCooldown < 1 years, "too long");
         withdrawCooldown = _withdrawCooldown;
     }
 
+    /**
+     * @dev Set the withdraw window.
+     * @param _withdrawWindow The withdraw window.
+     */
+    function setWithdrawWindow(uint256 _withdrawWindow)
+        external
+        onlyManagement
+    {
+        require(_withdrawWindow > 1 days, "too short");
+        withdrawWindow = _withdrawWindow;
+    }
+
+    /**
+     * @dev Set the collateral ratio.
+     * @param _collateralRatio The collateral ratio.
+     */
     function setCollateralRatio(uint256 _collateralRatio)
         external
         onlyManagement
