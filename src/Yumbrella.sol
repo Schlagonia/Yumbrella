@@ -5,7 +5,7 @@ import {IOracle} from "./interfaces/IOracle.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {IVault} from "@yearn-vaults/interfaces/IVault.sol";
 import {IVaultFactory} from "@yearn-vaults/interfaces/IVaultFactory.sol";
-import {TokenizedStaker, ERC20, SafeERC20} from "./TokenizedStaker.sol";
+import {TokenizedStaker, ERC20, SafeERC20} from "@periphery/Bases/Staker/TokenizedStaker.sol";
 import {Auction} from "@periphery/Auctions/Auction.sol";
 
 interface IValtCorrected {
@@ -64,7 +64,7 @@ contract Yumbrella is TokenizedStaker {
         string memory _name,
         address _seniorVault,
         address _assetToSeniorAssetOracle
-    ) TokenizedStaker(_seniorVault, _asset, _name) {
+    ) TokenizedStaker(_asset, _name) {
         SENIOR_VAULT = IVault(_seniorVault);
         SENIOR_ASSET = ERC20(SENIOR_VAULT.asset());
         VAULT_FACTORY = IVaultFactory(IValtCorrected(_seniorVault).FACTORY());
@@ -75,6 +75,8 @@ contract Yumbrella is TokenizedStaker {
         collateralRatio = 100_000; // 10x
         withdrawCooldown = 7 days;
         withdrawWindow = 7 days;
+
+        _addReward(_seniorVault, msg.sender, 1 weeks);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -86,14 +88,15 @@ contract Yumbrella is TokenizedStaker {
     function _freeFunds(uint256 _amount) internal override {}
 
     function _postWithdrawHook(
-        uint256, /* assets */
-        uint256, /* shares */
-        address, /* receiver */
+        uint256 assets,
+        uint256 shares,
+        address receiver,
         address owner,
-        uint256 /* maxLoss */
+        uint256 maxLoss
     ) internal virtual override {
         // Fully reset the withdraw request.
         delete withdrawRequests[owner];
+        super._postWithdrawHook(assets, shares, receiver, owner, maxLoss);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -146,7 +149,10 @@ contract Yumbrella is TokenizedStaker {
             );
             uint256 sharesToEarn = SENIOR_VAULT.convertToShares(_fees);
             uint256 protocolShares = (sharesToEarn * protocolFee) / MAX_BPS;
-            _notifyRewardAmount(sharesToEarn - protocolShares);
+            _notifyRewardAmount(
+                address(SENIOR_VAULT),
+                sharesToEarn - protocolShares
+            );
         } else {
             // TODO: Check if the auction was kicked and filled.
             //require(!Auction(auction).isActive(address(asset)), "auction not filled");
@@ -367,7 +373,7 @@ contract Yumbrella is TokenizedStaker {
         external
         onlyManagement
     {
-        require(_withdrawCooldown < 1 years, "too long");
+        require(_withdrawCooldown < 365 days, "too long");
         withdrawCooldown = _withdrawCooldown;
     }
 
