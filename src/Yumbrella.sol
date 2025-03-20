@@ -12,7 +12,9 @@ interface IValtCorrected {
     function FACTORY() external view returns (address);
 }
 
-// Can kick auction in `tend` and refund in `report` OR kick in `report` and dont allow withdraws till auction is over and recall report.
+interface IKeeper {
+    function report(address _strategy) external returns (uint256, uint256);
+}
 
 /// @notice You can farm under my Yumbrella
 contract Yumbrella is TokenizedStaker {
@@ -154,9 +156,16 @@ contract Yumbrella is TokenizedStaker {
                 sharesToEarn - protocolShares
             );
         } else {
-            // TODO: Check if the auction was kicked and filled.
-            //require(!Auction(auction).isActive(address(asset)), "auction not filled");
-            _refunds = Math.min(_loss, SENIOR_ASSET.balanceOf(address(this)));
+            // Check if the auction was kicked and filled.
+            require(
+                Auction(auction).available(address(asset)) == 0,
+                "auction not filled"
+            );
+            _refunds = Math.min(
+                (_loss * refundRatio) / MAX_BPS,
+                SENIOR_ASSET.balanceOf(address(this))
+            );
+            SENIOR_ASSET.forceApprove(address(SENIOR_VAULT), _refunds);
         }
     }
 
@@ -223,20 +232,18 @@ contract Yumbrella is TokenizedStaker {
         returns (uint256)
     {
         WithdrawRequest memory request = withdrawRequests[_owner];
-        uint256 cooldownEnd = request.timestamp + withdrawCooldown;
         if (
             // If the cooldown period has passed
-            cooldownEnd < block.timestamp &&
+            request.timestamp < block.timestamp &&
             // And the window has not passed
-            cooldownEnd + withdrawWindow > block.timestamp
+            request.timestamp + withdrawWindow > block.timestamp
         ) {
             return request.amount;
         }
         return 0;
     }
 
-    // NOTE: This means users continue to earn rewards while unlocked.
-    // Should add a max time to withdraw like stAAVE? To prevent calling right after deposit?
+    // NOTE: This means users continue to earn rewards while unlocked but also can get slashed.
     function requestWithdraw(uint256 _amount) external {
         uint256 currentAmount = withdrawRequests[msg.sender].amount;
         _amount = Math.min(
@@ -248,7 +255,7 @@ contract Yumbrella is TokenizedStaker {
 
         withdrawRequests[msg.sender] = WithdrawRequest({
             amount: _amount,
-            timestamp: block.timestamp
+            timestamp: block.timestamp + withdrawCooldown
         });
     }
 
@@ -289,10 +296,14 @@ contract Yumbrella is TokenizedStaker {
         }
 
         if (_loss > 0) {
-            uint256 toAuction = _fromSeniorAssetToAsset(_loss);
+            uint256 toAuction = Math.min(
+                _fromSeniorAssetToAsset((_loss * refundRatio) / MAX_BPS),
+                asset.balanceOf(address(this))
+            );
             asset.safeTransfer(address(auction), toAuction);
-            //Auction(auction).kick(address(asset));
-            TokenizedStrategy.report();
+            Auction(auction).kick(address(asset));
+            // Eat the loss.
+            IKeeper(TokenizedStrategy.keeper()).report(address(this));
         }
     }
 
@@ -326,7 +337,10 @@ contract Yumbrella is TokenizedStaker {
      */
     function setAuction(address _auction) external onlyEmergencyAuthorized {
         if (_auction != address(0)) {
-            require(Auction(_auction).want() == address(asset), "wrong want");
+            require(
+                Auction(_auction).want() == address(SENIOR_ASSET),
+                "wrong want"
+            );
         }
         auction = _auction;
     }
